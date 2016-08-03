@@ -1,0 +1,18 @@
+Value hostname (\S+)
+Value model (\S+)
+Value image (\S+)
+Value serial (\S+)
+Value memory (\S+)
+Value Version (.*?)
+Value total_flash (\S+)
+Value available_flash (\S+)
+Value filesystem (\S+:)
+
+
+Start
+  ^Cisco IOS Software.*Version ${Version},
+  ^${hostname} uptime is*
+  ^.*ystem image file is "${filesystem}/?${image}"
+  ^.*isco ${model} .* with ${memory} bytes of memory
+  ^Processor board ID ${serial}
+  ^${total_flash} bytes total .*\(${available_flash} bytes free\)

@@ -1,0 +1,4 @@
+Value File (\S+\.bin)
+
+Start
+  ^\s+\d+.*\s+${File} -> Record
