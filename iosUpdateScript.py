@@ -12,6 +12,7 @@ from sqlalchemy.orm import sessionmaker, relationship
 from sqlalchemy.ext.declarative import declarative_base
 from Queue import Queue
 from threading import Thread, activeCount
+from PyQt4 import QtGui, QtCore
 
 
 engine = create_engine('sqlite:///devices.db')
@@ -34,7 +35,6 @@ class CiscoDevice(Base):
     username = Column(String)
     password = Column(String)
     reload_pending = Column(Boolean)
-
 
     def __init__(self, hostname, ip_address=None, model=None, filesystem=None, ram=None, total_flash=0, available_flash=0, boot_variable=None, current_image=None, compliant_image=None, compliant=False, username=None, password=None):
         self.hostname = hostname
@@ -241,7 +241,6 @@ class CiscoDevice(Base):
                 self.compliance = True
                 self.reload_pending = True
 
-
     def schedule_reload(self,reload_time):
 
         # Initiate SSH Connection to device
@@ -253,6 +252,159 @@ class CiscoDevice(Base):
 
         # Send 'reload at' command
         output = ssh_conn.send_command('reload at %s' % reload_time)
+
+
+class MainWindow(QtGui.QMainWindow):
+
+    def __init__(self):
+        super(MainWindow, self).__init__()
+        self.setGeometry(500, 300, 2000, 1000)
+        self.setWindowTitle('IOS Software Upgrade Utility')
+        self.setWindowIcon(QtGui.QIcon('discover.png'))
+
+        # Create action to be added to Menu
+        exitAction = QtGui.QAction('&Quit', self)
+        exitAction.setShortcut('Ctrl+Q')
+        exitAction.setStatusTip('Exit Application')
+        exitAction.triggered.connect(self.exit_application)
+
+        # Add Status Bar
+        self.statusBar()
+
+        # Create Main menu and add File Menu + Items
+        mainMenu = self.menuBar()
+        fileMenu = mainMenu.addMenu('&File')
+        fileMenu.addAction(exitAction)
+
+        # Add Discovery Action for Toolbar
+        discoverAction = QtGui.QAction(QtGui.QIcon('discover.png'),'Perform Device Discovery', self)
+        discoverAction.setIconText('Discover')
+        discoverAction.setStatusTip('Perform Device Discovery')
+        discoverAction.triggered.connect(self.discover)
+
+        # Add Import Action for Toolbar
+        importAction = QtGui.QAction(QtGui.QIcon('import.png'),'Import Devices', self)
+        importAction.setIconText('Import')
+        importAction.setStatusTip('Import Devices from File')
+        importAction.triggered.connect(self.import_devices)
+
+        # Add Update Device Action for Toolbar
+        updateAction = QtGui.QAction(QtGui.QIcon('upload.png'),'Upload IOS', self)
+        updateAction.setIconText('Upload IOS')
+        updateAction.setStatusTip('Upload Compliant IOS to Devices')
+        updateAction.triggered.connect(self.update_devices)
+
+        # Add Toolbar
+        self.toolBar = self.addToolBar('Main Toolbar')
+        self.toolBar.addAction(importAction)
+        self.toolBar.addAction(discoverAction)
+        self.toolBar.addAction(updateAction)
+        self.toolBar.setToolButtonStyle(QtCore.Qt.ToolButtonTextUnderIcon)
+
+        # Create QTableWidget
+        self.table = QtGui.QTableWidget(self)
+
+        # Create Horizontal Layout & Central Widget
+        central_widget = QtGui.QWidget()
+        vbox = QtGui.QVBoxLayout()
+        vbox.addWidget(self.table)
+        self.setCentralWidget(central_widget)
+        central_widget.setLayout(vbox)
+
+        Base.metadata.create_all()
+        Session = sessionmaker(bind=engine)
+        self.s = Session()
+
+        # Read settings.ini file to gather list of hosts, model to ios image mappings and credential list
+        print "Reading settings.ini file...."
+        self.hosts, self.ios_images, self.credentials, self.config = read_settings_ini()
+        print "Read %d hosts, %d device models and %d set(s) of authentication credentials" % (len(self.hosts), len(self.ios_images), len(self.credentials))
+
+        print "Reading Database Contents"
+        self.stored_devices = get_db_devices(self.s)
+
+        # Update Table with Database contents
+        self.update_table()
+
+        self.show()
+
+    def update_table(self):
+        # Create Table Headers
+        horizontal_headers = ['Hostname', 'IP Address', 'Model', 'Current Image', 'Compliant']
+
+        # self.table.setRowCount(5)
+        self.table.setColumnCount(len(horizontal_headers))
+        # Set Table Row Count according to number of Devices
+        self.table.setRowCount(len(self.stored_devices))
+
+        # Add Header Row
+        header = self.table.horizontalHeader()
+        header.setResizeMode(QtGui.QHeaderView.Stretch) # Stretches all columns to fit window
+        # header.setStretchLastSection(True) # Stretches just the last column
+
+        self.table.setHorizontalHeaderLabels(horizontal_headers)
+        self.table.resizeColumnsToContents()
+        self.table.resizeRowsToContents()
+
+        # Fill Table with Database Contents
+        for row, device in enumerate(self.stored_devices):
+            self.table.setItem(row, 0, QtGui.QTableWidgetItem(device.hostname))
+            self.table.setItem(row, 1, QtGui.QTableWidgetItem(device.ip_address))
+            self.table.setItem(row, 2, QtGui.QTableWidgetItem(device.model))
+            self.table.setItem(row, 3, QtGui.QTableWidgetItem(device.current_image))
+            self.table.setItem(row, 4, QtGui.QTableWidgetItem(str(device.compliant)))
+
+        self.table.resizeColumnsToContents()
+
+    def import_devices(self):
+        # Refresh settings.ini file
+        self.hosts, self.ios_images, self.credentials, self.config = read_settings_ini()
+
+        # Import Devices into Database from settings.ini file
+        self.config, self.s = import_devices(self.hosts, self.stored_devices, self.config, self.s)
+
+        # Reread stored devices
+        self.stored_devices = get_db_devices(self.s)
+
+        # Discover newly added devices
+        print "Discovering newly read devices"
+        self.discover()
+
+        # Reread settings.ini
+        self.hosts, self.ios_images, self.credentials, self.config = read_settings_ini()
+
+    def discover(self):
+        print "Auditing Devices...."
+        audit_devices(self.stored_devices, self.ios_images, self.credentials)
+        self.s.commit()
+
+        # Reread stored devices and reupdate table
+        self.stored_devices = get_db_devices(self.s)
+        self.update_table()
+
+    def update_devices(self):
+        non_compliant_devices = []
+        for device in self.stored_devices:
+            if not device.compliant:
+                non_compliant_devices.append(device)
+        print "Updating %s Devices" % len(non_compliant_devices)
+        enforce_compliance(non_compliant_devices)
+
+        # Commit any changes (i.e. reload_pending, compliance etc) to database.
+        self.s.commit()
+
+        # Reread stored devices
+        stored_devices = get_db_devices(self.s)
+
+    def exit_application(self):
+        choice = QtGui.QMessageBox.question(self, 'Confirm Exit', 'Are you sure you wish to exit?',
+                                            QtGui.QMessageBox.Yes | QtGui.QMessageBox.No)
+
+        if choice == QtGui.QMessageBox.Yes:
+            print "Exiting Application"
+            sys.exit()
+        else:
+            pass
 
 
 def parse_output(raw_text_data, template):
@@ -298,7 +450,6 @@ def read_settings_ini():
     return hosts, ios_images, credentials, config
 
 
-
 def enforce_compliance_helper(queue):
     device = queue.get()
 
@@ -337,7 +488,6 @@ def enforce_compliance(devices):
     for device in devices_requiring_reload:
         print '{} - {}'.format(device.hostname,device.ip_address)
 
-
     # schedule_reload = raw_input("\nDo you wish to enter a time now to reload devices? [y, N]")
     #
     # if schedule_reload == 'y':
@@ -353,7 +503,6 @@ def enforce_compliance(devices):
     #
     # else:
     #     print "Skipping reload scheduling..."
-
 
 
 def export_device_to_csv(devices):
@@ -385,7 +534,6 @@ def audit_devices(devices, ios_images, credentials):
             worker.start()
 
     queue.join()
-
 
 
 def list_db_devices(s, non_compliant_only=False, reload_pending_only=False):
@@ -443,78 +591,11 @@ def get_db_devices(s):
 
 def main():
 
-    Base.metadata.create_all()
-    Session = sessionmaker(bind=engine)
-    s = Session()
+    # Build Main Application Window
+    app = QtGui.QApplication(sys.argv)
+    main_window = MainWindow()
 
-    # Read settings.ini file to gather list of hosts, model to ios image mappings and credential list
-    print "Reading settings.ini file...."
-    hosts, ios_images, credentials, config = read_settings_ini()
-    print "Read %d hosts, %d device models and %d set(s) of authentication credentials" % (len(hosts), len(ios_images), len(credentials))
-
-    print "Reading Database Contents"
-    stored_devices = get_db_devices(s)
-
-    while True:
-        print '\n\n###################'
-        print 'Main Menu\n\n'
-        print '[1] - Load New Devices into Database'
-        print '[2] - Display Devices in Database'
-        print '[3] - Audit Devices in Database'
-        print '[4] - Display Non Compliant Devices'
-        print '[5] - Update IOS of Non Compliant Devices'
-        print '\n[9] - Exit'
-        selection = raw_input('> ')
-
-        if selection == '1':
-            # Import Devices into Database
-            config, s = import_devices(hosts, stored_devices, config, s)
-
-            # Reread stored devices
-            stored_devices = get_db_devices(s)
-
-            # Reread settings.ini
-            hosts, ios_images, credentials, config = read_settings_ini()
-
-        elif selection == '2':
-            list_db_devices(s)
-
-        elif selection == '3':
-
-            print "\nPerforming Device Audit"
-            audit_devices(stored_devices, ios_images, credentials)
-            s.commit()
-
-            # Reread stored devices
-            stored_devices = get_db_devices(s)
-
-        elif selection == '4':
-            non_compliant_only = True
-            list_db_devices(s, non_compliant_only)
-
-        elif selection == '5':
-            non_compliant_devices = []
-            for device in stored_devices:
-                if not device.compliant:
-                    non_compliant_devices.append(device)
-            print "Updating %s Devices" % len(non_compliant_devices)
-            enforce_compliance(non_compliant_devices)
-
-            # Commit any changes (i.e. reload_pending, compliance etc) to database.
-            s.commit()
-
-            # Reread stored devices
-            stored_devices = get_db_devices(s)
-
-        elif selection == '9':
-            print "Exiting..."
-            break
-
-        else:
-            print "Invalid Selection..."
-
-
-
+    sys.exit(app.exec_())
 
 
 if __name__ == "__main__":
